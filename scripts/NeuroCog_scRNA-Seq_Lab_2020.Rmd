@@ -36,7 +36,7 @@ devtools::install_github('cvarrichio/Matrix.utils')
 if (!require(BiocManager)) {
   install.packages("BiocManager")
   BiocManager::install(c("DropletUtils", "BSgenome.Mmusculus.UCSC.mm10",
-                       "AnnotationHub", "SingleR","biomaRt","tidyverse","scales","zeallot","densityClust"))
+                       "AnnotationHub", "SingleR","celldex","biomaRt","tidyverse","scales","zeallot","densityClust"))
 }
 ```
 
@@ -74,6 +74,7 @@ library(scales)
 library(zeallot)
 library(DropletUtils)
 library(SingleR)
+library(celldex)
 library(NNLM)
 library(monocle3)
 theme_set(theme_bw()) # Setting a more pleasing default theme
@@ -113,6 +114,7 @@ Experimental questions:
 First, we will need to download the dataset, unless it has already been downloaded for you.
 ```{r dl_data}
 # Download data
+# If error, please make sure that data directory exists off of project root (e.g. dir.create('data'))
 if (!file.exists("./data/neuron_10k_v3_fastqs.tar")) {
   download.file("http://s3-us-west-2.amazonaws.com/10x.files/samples/cell-exp/3.0.0/neuron_10k_v3/neuron_10k_v3_fastqs.tar", "./data/neuron_10k_v3_fastqs.tar", method = "wget", quiet = TRUE)
 }
@@ -410,7 +412,7 @@ Before we move on to exploration and annotation of the data, we first need to ge
 ### Dispersion Estimation
 The dispersion estimate is a useful metric to identify genes that have higher variance than expected.  Per-gene technical variance in scRNA-Seq data [is well modeled](http://www.nxn.se/valent/2017/11/16/droplet-scrna-seq-is-not-zero-inflated) by a [negative binomial fit](https://en.wikipedia.org/wiki/Negative_binomial_distribution). Genes with excess variation (overdispersion) _should_ have high biological variation above and beyond the modeled technical variance.
 
-```{r dispersion}
+```{r dispersion, eval=FALSE}
 dat<-m3addon::calculate_gene_dispersion(dat,id_tag="gene_id")
 
 # Select genes with high dispersion relative to fit
@@ -422,7 +424,7 @@ This plot shows how the variance in gene expression measures changes as a functi
 ### Monocle3 preprocessing
 The term 'preprocessing' comes up again even though we're past the initial hurdle of generating the matrix. Standard secondary preprocessing for single cell RNA-Seq involves projecting expression data into the top principal components to identify ranked sources of variation. This is usually done after log-transforming the data to stabilize the variance across the dynamic range of gene expression. Monocle3 conveniently provides a function `preprocess_cds()` that will do this transform and PCA analysis. We start with a relatively high number of principal components to estimate, 100.
 
-```{r initial preprocessing}
+```{r initial_preprocessing}
 dat <- preprocess_cds(dat,
                       num_dim = 100,
                       method = "PCA",
@@ -435,7 +437,7 @@ plot_pc_variance_explained(dat)
 If we look at the variance explained for each principle component, we can see that it starts to trail off after a point.  We probably won't get much more useful information after 40 or so components. So we subset to only the first 40 components and preprocess again.
 
 ```{r nDims_preprocessing}
-nDims<-40
+nDims <- 20 # or 20 works here too downstream
 dat <- preprocess_cds(dat,
                       num_dim = nDims,
                       method = "PCA",
@@ -552,7 +554,9 @@ What can we deduce/hypothesize about the embedding (we will formally test later)
 
 We can also map the expression level of individual genes (markers) onto this embedding to start to parse out meaning.
 ```{r known_genes_1}
-plot_cells(dat,genes=c("Fezf2","Pax6","Satb2","Eomes","Tle4","Bcl11b"),cell_size=0.75)
+plot_cells(dat,genes=c("Sox9","Gad1","Slc17a6","Slc17a7"),cell_size=0.75)
+
+plot_cells(dat,genes=c("Pax6","Eomes","Fezf2","Tle4","Satb2","Pou3f2"),cell_size=0.75)
 ```
 
 ## Cluster similar cells into 'cell types'
@@ -560,7 +564,7 @@ We next want to impose a clustering solution onto this embedding to group cells 
 ```{r cluster_leiden}
 dat <- cluster_cells(dat,
                      verbose=TRUE,
-                     resolution=1e-5)
+                     resolution=1e-4)
 
 plot_cells(dat, color_cells_by="cluster", cell_size=0.75, group_label_size = 5, show_trajectory_graph=FALSE)
 ```
@@ -570,7 +574,7 @@ Remember, clustering is a useful _tool_ but is also _*arbitrary*_ for continuous
 As a crude first-pass annotation, we can leverage publicly available, bulk RNA-Seq gene expression information for specific cell types to try and 'learn' cell type annotations for each cell. This 'transfer learning' approach can provide a resonable starting point for coarse cell type identification. The `SingleR` package  leverages reference transcriptomic datasets of pure cell types to infer the cell of origin of each of the single cells independently. First we need to fetch a reference dataset of bulk RNA-Seq expression profiles.
 
 ```{r singleR_ref_fetch}
-mouse.rnaseq <- SingleR::MouseRNAseqData(ensembl = TRUE)
+mouse.rnaseq <- celldex::MouseRNAseqData(ensembl = TRUE)
 ```
 
 ```{r, include=FALSE}
@@ -588,7 +592,7 @@ rownames(dat.exprs) <- str_remove(rownames(dat.exprs), "\\.\\d+")
 
 system.time(annots<-SingleR(dat.exprs,
                 ref = mouse.rnaseq, labels = colData(mouse.rnaseq)$label.fine,
-                de.method = "classic", method = "single", BPPARAM = MulticoreParam(4))
+                de.method = "classic", method = "single", BPPARAM = BiocParallel::MulticoreParam(4))
 )
 ```
 
@@ -625,12 +629,16 @@ dat <- preprocess_cds(dat,
 dat <- reduce_dimension(dat,
                         verbose=TRUE,
                         reduction_method="UMAP",
+                        umap.n_neighbors=20,
                         cores = 4)
 dat <- cluster_cells(dat,
                      verbose=TRUE,
                      resolution=1e-5)
 
 plot_cells(dat,color_cells_by="cell_type", group_cells_by = "cluster", cell_size=0.75, label_cell_groups = FALSE) + scale_color_brewer(palette="Set1")
+plot_cells(dat,color_cells_by="cluster",cell_size=0.75)
+plot_cells(dat,color_cells_by="partition",cell_size=0.75)
+plot_cells(dat,genes=c("Pax6","Eomes","Fezf2","Tle4","Satb2","Pou3f2"),cell_size=0.75)
 
 ```
 
@@ -639,7 +647,7 @@ One of our objectives is to find marker genes expressed by each cluster/cell typ
 Once cells have been clustered, we can ask what genes makes them different from one another. To do that, start by calling the `top_markers()` function:
 
 ```{r marker_genes_1, message=FALSE, warning=FALSE, results='hide'}
-marker_test_res <- top_markers(dat, group_cells_by="cell_type",
+marker_test_res <- top_markers(dat, group_cells_by="cluster",
                                reference_cells=500, cores=4)
 ```
 
@@ -647,15 +655,17 @@ marker_test_res <- top_markers(dat, group_cells_by="cell_type",
 top_specific_markers <- marker_test_res %>%
                            dplyr::filter(fraction_expressing >= 0.30) %>%
                             group_by(cell_group) %>%
-                            top_n(1, pseudo_R2)
+                            top_n(5, pseudo_R2)
 
 top_specific_marker_ids <- unique(top_specific_markers %>% pull(gene_id))
 
 plot_genes_by_group(dat,
                     top_specific_marker_ids,
-                    group_cells_by="cell_type",
+                    group_cells_by="cluster",
                     ordering_type="maximal_on_diag",
                     max.size=4)
+
+plot_cells(dat,color_cells_by="cluster",cell_size=0.75, group_label_size = 8)
 ```
 
 # Pseudotime analysis
@@ -675,7 +685,8 @@ plot_cells(dat,
            graph_label_size=3,
            cell_size=0.75) + scale_color_brewer(palette="Set1")
 
-dat <- order_cells(dat, root_pr_nodes="Y_3")
+dat <- order_cells(dat,
+                   root_pr_nodes="Y_54")
 
 plot_cells(dat,
            color_cells_by = "pseudotime",
@@ -700,21 +711,22 @@ pr_deg_ids <- row.names(subset(pseudotime_pr_test_res, q_value < 1e-50))
 Here are some high-scoring differentially expressed genes along the pseudotime trajectory in their UMAP embedding
 ```{r pr_de_genes_UMAP}
 pseudotime_genes <- c("Pax6","Btg2","Snap25","Fezf2","Hes6","Cux1")
+#pseudotime_genes <- head(pseudotime_pr_test_res[order(pseudotime_pr_test_res$q_value),])$external_gene_name
 plot_cells(dat, genes=pseudotime_genes,
-           show_trajectory_graph=FALSE,
+           show_trajectory_graph=TRUE,
            label_cell_groups=FALSE,
            label_leaves=FALSE,
-           cell_size=0.25)
+           cell_size=0.5)
 ```
 
 We can also explicitly look at how the expression of these genes along the pseudotime trajectory. The function `plot_genes_in_pseudotime()` takes a small set of genes and shows you their dynamics as a function of pseudotime:
 ```{r pr_de_genes_pseudotime}
-
 pseudotime_lineage_cds <- dat[fData(dat)$gene_short_name %in% pseudotime_genes,
                        pData(dat)$cell_type %in% c("NPCs","Neurons")]
 plot_genes_in_pseudotime(pseudotime_lineage_cds,
                          color_cells_by="cell_type",
-                         min_expr=0.5)
+                         min_expr=0.5,
+                         ncol=2)
 ```
 
 ### Bonus: 3D trajectories
@@ -766,7 +778,7 @@ plot_cells(dat, color_cells_by=paste0("Pattern_",i), cell_size=0.75) +
 })
 dev.off()
 
-targetPattern<-24
+targetPattern<-10
 plot_cells(dat, color_cells_by=paste0("Pattern_",targetPattern), cell_size=0.75) +
     ggtitle(paste0("Pattern ",targetPattern))  +
     coord_equal(1)
@@ -781,9 +793,9 @@ colnames(geneWeights.df)<-paste0("Pattern_",c(1:nPatterns))
 #fData(dat)[head(rownames(dat.nnmf$W)[order(dat.nnmf$W[,patternOfInterest],decreasing=TRUE)]),]
 tmp<-as.data.frame(merge(fData(dat)[,c("gene_id","gene_short_name")],geneWeights.df,by=0))
 
-targetPattern<-c(5,8,16,23)
+targetPatterns<-c(5,9,10,23,targetPattern)
 DT::datatable(tmp[,c("gene_id","gene_short_name",
-                     unlist(lapply(targetPattern,function(i){paste0("Pattern_",i)
+                     unlist(lapply(targetPatterns,function(i){paste0("Pattern_",i)
                        }))
                        )])
 ```
